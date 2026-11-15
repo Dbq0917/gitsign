@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/github/smimesign/fakeca"
+	sgroot "github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
 
@@ -66,6 +67,39 @@ func TestNew(t *testing.T) {
 				t.Errorf("Root CertPool did not match, want: %+v", tc.root)
 			}
 		})
+	}
+}
+
+func TestFromTrustedRoot(t *testing.T) {
+	ca := fakeca.New()
+	tr, err := sgroot.NewTrustedRoot(
+		sgroot.TrustedRootMediaType01,
+		[]sgroot.CertificateAuthority{&sgroot.FulcioCertificateAuthority{Root: ca.Certificate}},
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := tr.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "trusted_root.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, intermediates, err := New(x509.NewCertPool(), FromTrustedRoot(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !root.Equal(certpool(ca.Certificate)) {
+		t.Error("trusted root did not contain the Fulcio root")
+	}
+	if intermediates != nil {
+		t.Error("unexpected Fulcio intermediates")
 	}
 }
 

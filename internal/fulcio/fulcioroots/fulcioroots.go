@@ -24,6 +24,8 @@ import (
 	"os"
 
 	"github.com/sigstore/gitsign/internal/config"
+	"github.com/sigstore/gitsign/internal/sigstore/localcache"
+	sgroot "github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/sigstore/sigstore/pkg/tuf"
 )
@@ -90,7 +92,41 @@ func sourcesFromConfig(ctx context.Context, cfg *config.Config) []CertificateSou
 	if cfg.FulcioRoot != "" {
 		return []CertificateSource{FromFile(cfg.FulcioRoot)}
 	}
+	// Prefer a local sigstore-go trusted root when one is available. It already
+	// contains the Fulcio, Rekor, CT, and TSA trust material from the mirror
+	// selected by `gitsign initialize` (or cosign), and avoids relying on the
+	// sigstore/sigstore client's embedded root, which has a short lifetime.
+	if path, ok := localcache.TrustedRootPath(); ok {
+		return []CertificateSource{FromTrustedRoot(path)}
+	}
 	return []CertificateSource{FromTUF(ctx)}
+}
+
+// FromTrustedRoot loads Fulcio roots and intermediates from a sigstore-go
+// trusted_root.json file.
+func FromTrustedRoot(path string) CertificateSource {
+	return func() ([]*x509.Certificate, error) {
+		tr, err := sgroot.NewTrustedRootFromPath(path)
+		if err != nil {
+			return nil, fmt.Errorf("loading trusted root %s: %w", path, err)
+		}
+
+		var certs []*x509.Certificate
+		for _, ca := range tr.FulcioCertificateAuthorities() {
+			fca, ok := ca.(*sgroot.FulcioCertificateAuthority)
+			if !ok {
+				continue
+			}
+			if fca.Root != nil {
+				certs = append(certs, fca.Root)
+			}
+			certs = append(certs, fca.Intermediates...)
+		}
+		if len(certs) == 0 {
+			return nil, fmt.Errorf("no Fulcio certificates in trusted root %s", path)
+		}
+		return certs, nil
+	}
 }
 
 const (

@@ -1,5 +1,12 @@
 # Verification
 
+When a local sigstore-go trusted root is available (the
+`$TUF_ROOT/<mirror>/targets/trusted_root.json` created by `gitsign initialize`
+or compatible Sigstore tooling), verification uses its Fulcio, Rekor, CT, and
+timestamping authorities directly. This keeps verification working with the
+mirror selected during initialization and avoids depending on the short-lived
+TUF root embedded in the binary.
+
 ## Offline Verification
 
 ### How we sign

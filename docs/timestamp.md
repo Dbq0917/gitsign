@@ -5,26 +5,27 @@ Gitsign includes support for signing commits with a
 
 #### Sign
 
-To use a TSA during signing, set the `timestampURL` config option (one-time
+To use a TSA during signing, set the `timestampServerURL` config option (one-time
 setup) to the RFC 3161 URL to use.
 
 For example, using the
 [Digicert TSA](https://knowledge.digicert.com/generalinformation/INFO4231.html):
 
 ```sh
-$ git config --local gitsign.timestampURL http://timestamp.digicert.com
+$ git config --local gitsign.timestampServerURL http://timestamp.digicert.com
 $ git commit
 ```
 
 #### Verify
 
-By default, Gitsign will use your system certificate pool to verify TSA
-signatures. To specify additional certificates to use for verification, set the
-`timestampCert` config option to the path containing a PEM-encoded TSA
+By default, Gitsign will use your system certificate pool and any timestamping
+authorities in the local Sigstore trusted root to verify TSA signatures. To
+specify additional certificates to use for verification, set the
+`timestampCertChain` config option to the path containing a PEM-encoded TSA
 certificate chain.
 
 ```sh
-$ git config --local gitsign.timestampCert tsa.pem
+$ git config --local gitsign.timestampCertChain tsa.pem
 $ git verify-commit head
 tlog index: 8031421
 gitsign: Signature made using certificate ID 0xe615fa467ce0aaae5f81f1965dd19e89f859f24a | CN=sigstore-intermediate,O=sigstore.dev

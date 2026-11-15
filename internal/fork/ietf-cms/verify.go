@@ -149,12 +149,11 @@ func (sd *SignedData) verify(econtent []byte, opts x509.VerifyOptions, tsOpts x5
 			return nil, err
 		}
 
-		// If the caller didn't specify the signature time, we'll use the verified
-		// timestamp. If there's no timestamp we use the current time when checking
-		// the cert validity window. This isn't perfect because the signature may
-		// have been created before the cert's not-before date, but this is the best
-		// we can do. We update a copy of opts because we are verifying multiple
-		// signatures in a loop and only want the timestamp to affect this one.
+		// If the caller didn't specify the signature time, use the verified
+		// timestamp. If there's no timestamp, a per-certificate fallback below
+		// keeps the validity-window check from depending on wall-clock time.
+		// We update a copy of opts because we are verifying multiple signatures
+		// in a loop and only want the timestamp to affect this one.
 		optsCopy := opts
 
 		if hasTS, err := hasTimestamp(si); err != nil {
@@ -169,10 +168,13 @@ func (sd *SignedData) verify(econtent []byte, opts x509.VerifyOptions, tsOpts x5
 				return nil, err
 			}
 
-			// This check is slightly redundant, given that the cert validity times
-			// are checked by cert.Verify. We take the timestamp accuracy into account
-			// here though, whereas cert.Verify will not.
-			if !tsti.Before(cert.NotAfter) || !tsti.After(cert.NotBefore) {
+			// Check the TSA's recorded signing time against the certificate
+			// validity window directly. tsti.Before/After pad GenTime by the
+			// timestamp accuracy, which narrows an already short-lived Fulcio
+			// certificate window and rejects legitimate signatures when Fulcio
+			// and the TSA have small clock skew. The bounds are inclusive, as
+			// in x509.Verify. cert.Verify below enforces the same window.
+			if tsti.GenTime.After(cert.NotAfter) || tsti.GenTime.Before(cert.NotBefore) {
 				return nil, x509.CertificateInvalidError{Cert: cert, Reason: x509.Expired, Detail: "timestamp authority verification failed"}
 			}
 

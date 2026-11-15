@@ -16,9 +16,15 @@ package rekor
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/gitsign/internal/sigstore/localcache"
 	gitrekor "github.com/sigstore/gitsign/pkg/rekor"
 	rekor "github.com/sigstore/rekor/pkg/client"
+	sgroot "github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/tuf"
 )
 
 // NewClient returns a new Rekor client with common client options set.
@@ -29,6 +35,39 @@ func NewClient(url string) (*gitrekor.Client, error) {
 }
 
 // NewClientContext returns a new Rekor client with common client options set.
+// When a local sigstore-go trusted root is present, its Rekor public keys are
+// used instead of sigstore/sigstore's TUF client, whose embedded root can
+// expire and break verification.
 func NewClientContext(ctx context.Context, url string) (*gitrekor.Client, error) {
-	return gitrekor.NewWithOptions(ctx, url, gitrekor.WithClientOption(rekor.WithUserAgent("gitsign")))
+	opts := []gitrekor.Option{gitrekor.WithClientOption(rekor.WithUserAgent("gitsign"))}
+	if path, ok := localcache.TrustedRootPath(); ok {
+		opts = append(opts, gitrekor.WithCosignRekorKeyProvider(rekorKeysFromTrustedRoot(path)))
+	}
+	return gitrekor.NewWithOptions(ctx, url, opts...)
+}
+
+func rekorKeysFromTrustedRoot(path string) gitrekor.CosignRekorKeyProvider {
+	return func(_ context.Context) (*cosign.TrustedTransparencyLogPubKeys, error) {
+		tr, err := sgroot.NewTrustedRootFromPath(path)
+		if err != nil {
+			return nil, fmt.Errorf("loading trusted root %s: %w", path, err)
+		}
+
+		keys := cosign.NewTrustedTransparencyLogPubKeys()
+		for _, log := range tr.RekorLogs() {
+			pem, err := cryptoutils.MarshalPublicKeyToPEM(log.PublicKey)
+			if err != nil {
+				return nil, fmt.Errorf("marshalling Rekor public key: %w", err)
+			}
+			// AddTransparencyLogPubKey derives the same log ID cosign uses when
+			// loading keys through TUF.
+			if err := keys.AddTransparencyLogPubKey(pem, tuf.Active); err != nil {
+				return nil, fmt.Errorf("adding Rekor public key: %w", err)
+			}
+		}
+		if len(keys.Keys) == 0 {
+			return nil, fmt.Errorf("no Rekor public keys in trusted root %s", path)
+		}
+		return &keys, nil
+	}
 }

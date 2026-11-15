@@ -28,6 +28,7 @@ import (
 	"github.com/sigstore/cosign/v3/pkg/cosign"
 	"github.com/sigstore/gitsign/internal/config"
 	"github.com/sigstore/gitsign/internal/fulcio/fulcioroots"
+	"github.com/sigstore/gitsign/internal/sigstore/localcache"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
@@ -76,49 +77,86 @@ func buildTrustedMaterial(ctx context.Context, cfg *config.Config, rekorPubs, ct
 }
 
 // timestampAuthorities builds the RFC3161 timestamping authorities from
-// cfg.TimestampCert. Unlike the legacy path, which trusts the system
-// certificate pool for TSA roots, the bundle path only trusts an explicitly
-// configured TSA certificate - sigstore-go models a timestamping authority as a
-// specific chain rather than a pool. When no TSA cert is configured, no
-// authorities are returned and a signature carrying an RFC3161 timestamp will
-// fail to verify (fail closed) rather than have the timestamp silently ignored.
+// cfg.TimestampCert, or from the local sigstore-go trusted root when no explicit
+// certificate is configured. Unlike the legacy path, which trusts the system
+// certificate pool for TSA roots, the bundle path needs a specific chain. Using
+// the trusted root avoids requiring a second local configuration step for
+// deployments whose TSA is already part of their TUF trust material. When no
+// authority is available, no authorities are returned and a signature carrying
+// an RFC3161 timestamp fails closed rather than having the timestamp silently
+// ignored.
 func timestampAuthorities(cfg *config.Config) ([]root.TimestampingAuthority, error) {
-	if cfg.TimestampCert == "" {
+	if cfg.TimestampCert != "" {
+		b, err := os.ReadFile(cfg.TimestampCert) // nolint:gosec
+		if err != nil {
+			return nil, err
+		}
+		certs, err := cryptoutils.UnmarshalCertificatesFromPEM(b)
+		if err != nil {
+			return nil, fmt.Errorf("loading certs from %s: %w", cfg.TimestampCert, err)
+		}
+
+		var roots, intermediates []*x509.Certificate
+		for _, cert := range certs {
+			if bytes.Equal(cert.RawSubject, cert.RawIssuer) {
+				roots = append(roots, cert)
+			} else {
+				intermediates = append(intermediates, cert)
+			}
+		}
+		if len(roots) == 0 {
+			return nil, fmt.Errorf("timestamp certificate %s must include a root CA", cfg.TimestampCert)
+		}
+
+		// One authority per root, each able to chain through the provided
+		// intermediates. The leaf (TSA signing cert) is taken from the timestamp
+		// token itself at verification time.
+		tsas := make([]root.TimestampingAuthority, 0, len(roots))
+		for _, r := range roots {
+			tsas = append(tsas, &root.SigstoreTimestampingAuthority{
+				Root:          r,
+				Intermediates: intermediates,
+			})
+		}
+		return tsas, nil
+	}
+
+	path, ok := localcache.TrustedRootPath()
+	if !ok {
 		return nil, nil
 	}
-
-	b, err := os.ReadFile(cfg.TimestampCert) // nolint:gosec
+	tr, err := root.NewTrustedRootFromPath(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading trusted root %s: %w", path, err)
 	}
-	certs, err := cryptoutils.UnmarshalCertificatesFromPEM(b)
-	if err != nil {
-		return nil, fmt.Errorf("loading certs from %s: %w", cfg.TimestampCert, err)
-	}
+	return tr.TimestampingAuthorities(), nil
+}
 
-	var roots, intermediates []*x509.Certificate
-	for _, cert := range certs {
-		if bytes.Equal(cert.RawSubject, cert.RawIssuer) {
-			roots = append(roots, cert)
-		} else {
-			intermediates = append(intermediates, cert)
+// addLocalTimestampAuthorities adds TSA roots and intermediates from a local
+// sigstore-go trusted root to pool, which the legacy verifier uses for RFC3161
+// timestamp validation.
+func addLocalTimestampAuthorities(pool *x509.CertPool) error {
+	path, ok := localcache.TrustedRootPath()
+	if !ok {
+		return nil
+	}
+	tr, err := root.NewTrustedRootFromPath(path)
+	if err != nil {
+		return fmt.Errorf("loading trusted root %s: %w", path, err)
+	}
+	for _, authority := range tr.TimestampingAuthorities() {
+		tsa, ok := authority.(*root.SigstoreTimestampingAuthority)
+		if !ok {
+			continue
+		}
+		if tsa.Root != nil {
+			pool.AddCert(tsa.Root)
+		}
+		for _, intermediate := range tsa.Intermediates {
+			pool.AddCert(intermediate)
 		}
 	}
-	if len(roots) == 0 {
-		return nil, fmt.Errorf("timestamp certificate %s must include a root CA", cfg.TimestampCert)
-	}
-
-	// One authority per root, each able to chain through the provided
-	// intermediates. The leaf (TSA signing cert) is taken from the timestamp
-	// token itself at verification time.
-	tsas := make([]root.TimestampingAuthority, 0, len(roots))
-	for _, r := range roots {
-		tsas = append(tsas, &root.SigstoreTimestampingAuthority{
-			Root:          r,
-			Intermediates: intermediates,
-		})
-	}
-	return tsas, nil
+	return nil
 }
 
 // transparencyLogs converts cosign transparency log public keys (keyed by log
